@@ -1,9 +1,9 @@
 [submodule "cds_semantic_index"]
-	path = create_semantic_index 
+	path = ./create_semantic_index 
 	url = https://github.com/Ayuei/cds_semantic_index.git
 [submodule "cds_2021"]
-	path = query 
+	path = ./query 
 	url = https://github.com/Ayuei/cds_2021.git
 [submodule "go-clinical-indexer"]
-	path = indexer
+	path = ./indexer
 	url = https://github.com/Ayuei/go-clinical-indexer.git
