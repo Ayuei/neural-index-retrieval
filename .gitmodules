@@ -7,3 +7,6 @@
 [submodule "go-clinical-indexer"]
 	path = indexer
 	url = https://github.com/Ayuei/go-clinical-indexer.git
+[submodule "squad_test_site/entmax"]
+	path = squad_test_site/entmax
+	url = https://github.com/deep-spin/entmax.git
