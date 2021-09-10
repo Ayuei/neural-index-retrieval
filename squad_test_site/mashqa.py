@@ -1,6 +1,5 @@
 import json
 
-import entmax
 import pytorch_lightning as pl
 import torch
 from torch import nn
@@ -16,7 +15,15 @@ class MashQA(torch.utils.data.Dataset):
         self.encodings = encodings
 
     def __getitem__(self, idx):
-        return {key: torch.tensor(val) for key, val in self.encodings[idx].items()}
+        d = {}
+
+        for k, v in self.encodings[idx].items():
+            if k == "label":
+                d[k] = torch.tensor([v])
+            else:
+                d[k] = torch.tensor(v)
+
+        return d
 
     def __len__(self):
         return len(self.encodings)
@@ -33,7 +40,7 @@ def read_path(path):
     sent_starts = []
     answers = []
 
-    for group in read_dict['data']:
+    for group in read_dict['data'][0:10]:
         for passage in group['paragraphs']:
             context = passage['context']
             s = passage["sent_list"]
@@ -119,19 +126,22 @@ class RegressionNet(pl.LightningModule):
         super().__init__()
         self.dense = nn.Linear(hidden_size*2, 1)
         #self.act = entmax.Entmax15(dim=-2)
-        self.loss = torch.nn.MSELoss(reduce=None)
+        self.loss = nn.BCEWithLogitsLoss()
+
+        self.train_metric = pl.metrics.MeanSquaredError()
+        self.val_metric = pl.metrics.MeanSquaredError()
 
     def forward(self, qas, sents, label=None):
-        label = torch.unsqueeze(label, dim=1)
         x = torch.cat((qas, sents), dim=-1)
         x = torch.flatten(x, 1)
         #x = self.act(x)
-        x = self.dense(x)
+        y_hat = self.dense(x)
 
         if label is None:
-            return x
+            return y_hat
         else:
-            return self.loss(x, label)
+            loss = self.loss(y_hat, label)
+            return loss, y_hat
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
@@ -139,17 +149,21 @@ class RegressionNet(pl.LightningModule):
 
     def training_step(self, train_batch, batch_idx):
         q, s, y = train_batch['question_encode'], train_batch['sentence_encode'], train_batch['label']
-        loss = self.forward(q, s, y)
+        loss, y_hat = self.forward(q, s, y)
 
         self.log('train_loss', loss)
+        self.train_metric(y_hat.detach(), y.detach())
+        self.log('train_met', self.train_metric, on_epoch=True, prog_bar=True)
 
         return loss
 
     def validation_step(self, val_batch, batch_idx):
         q, s, y = val_batch['question_encode'], val_batch['sentence_encode'], val_batch['label']
-        loss = self.forward(q, s, y)
+        loss, y_hat = self.forward(q, s, y)
 
-        self.log('train_loss', loss)
+        self.val_metric(y_hat.detach(), y.detach())
+        self.log('val_loss', loss)
+        self.log('val_met', self.val_metric, on_epoch=True, prog_bar=True)
 
 
 if __name__ == "__main__":
