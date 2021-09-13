@@ -2,6 +2,7 @@ import json
 
 import pytorch_lightning as pl
 import torch
+from sentence_transformers.util import batch_to_device
 from torch import nn
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
@@ -9,6 +10,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from functools import lru_cache
 
+TEST_FLAG=False
 
 class MashQA(torch.utils.data.Dataset):
     def __init__(self, encodings):
@@ -20,6 +22,8 @@ class MashQA(torch.utils.data.Dataset):
         for k, v in self.encodings[idx].items():
             if k == "label":
                 d[k] = torch.tensor([v])
+            elif isinstance(v, str):
+                d[k] = v
             else:
                 d[k] = torch.tensor(v)
 
@@ -40,7 +44,9 @@ def read_path(path):
     sent_starts = []
     answers = []
 
-    for group in read_dict['data'][0:10]:
+    read_dict = read_dict['data'][0:10] if TEST_FLAG else read_dict['data']
+
+    for group in read_dict:
         for passage in group['paragraphs']:
             context = passage['context']
             s = passage["sent_list"]
@@ -83,19 +89,23 @@ def generate_encodings(question_encodings, sent_encodings, answers, sent_lists):
     return encodings
 
 
-def prepare_dataset(sen_model, path):
+def prepare_dataset(sen_model, path, skip_encode=False):
     contexts, questions, answers, sents, sent_starts = read_path(path)
 
-    sent_encodings = []
+    question_encodings = questions
+    sent_encodings = sents
 
-    @lru_cache(10)
-    def encode(sen):
-        return sen_model.encode(sen)
+    if not skip_encode:
+        sent_encodings = []
 
-    for sent in tqdm(sents, desc="Train sent encodes"):
-        sent_encodings.append(encode(sent))
+        @lru_cache(10)
+        def encode(sen):
+            return sen_model.encode(sen)
 
-    question_encodings = model.encode(questions, show_progress_bar=True)
+        for sent in tqdm(sents, desc="Train sent encodes"):
+            sent_encodings.append(encode(sent))
+
+        question_encodings = model.encode(questions, show_progress_bar=True)
 
     encodings = generate_encodings(question_encodings, sent_encodings, answers, sent_starts)
 
@@ -104,10 +114,12 @@ def prepare_dataset(sen_model, path):
     return dset
 
 
+
 class RegressionNet(pl.LightningModule):
-    def __init__(self, hidden_size):
+    def __init__(self, hidden_size, encoder=None):
         super().__init__()
         self.dense = nn.Linear(hidden_size*2, 1)
+        self.encoder = encoder
         #self.act = entmax.Entmax15(dim=-2)
         self.loss = nn.BCEWithLogitsLoss()
 
@@ -116,7 +128,31 @@ class RegressionNet(pl.LightningModule):
         self.test_metric = pl.metrics.MeanSquaredError()
         self.test_acc = pl.metrics.Accuracy()
 
+    def get_encodes(self, sentences):
+        input_was_string = False
+        if isinstance(sentences, str) or not hasattr(sentences, '__len__'): #Cast an individual sentence to a list with length 1
+            sentences = [sentences]
+            input_was_string = True
+
+        sentences_batch = sentences
+        features = self.encoder.tokenize(sentences_batch)
+        features = batch_to_device(features, self.device)
+
+        out_features = self.encoder.forward(features)
+        embeddings = out_features['sentence_embedding']
+            #if self.normalize_embeddings:
+            #    embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+
+        if input_was_string:
+            embeddings = embeddings[0]
+
+        return embeddings
+
     def forward(self, qas, sents, label=None):
+        if self.encoder:
+            qas = self.get_encodes(qas)
+            sents = self.get_encodes(sents)
+
         x = torch.cat((qas, sents), dim=-1)
         x = torch.flatten(x, 1)
         #x = self.act(x)
@@ -162,20 +198,23 @@ class RegressionNet(pl.LightningModule):
         self.log('test_acc', self.test_acc, on_epoch=True, prog_bar=True)
 
 
+BACKPROP_FLAG = True
+
 if __name__ == "__main__":
     model = SentenceTransformer("all-distilroberta-v1")
 
-    train_set = prepare_dataset(model, "./datasets/mashqa_data/train_webmd_squad_v2_consec.json")
-    val_set = prepare_dataset(model, "./datasets/mashqa_data/val_webmd_squad_v2_consec.json")
-    test_set = prepare_dataset(model, "./datasets/mashqa_data/test_webmd_squad_v2_consec.json")
-
-    del model
+    train_set = prepare_dataset(model, "./datasets/mashqa_data/train_webmd_squad_v2_consec.json",
+                                skip_encode=BACKPROP_FLAG)
+    val_set = prepare_dataset(model, "./datasets/mashqa_data/val_webmd_squad_v2_consec.json",
+                              skip_encode=BACKPROP_FLAG)
+    test_set = prepare_dataset(model, "./datasets/mashqa_data/test_webmd_squad_v2_consec.json",
+                               skip_encode=BACKPROP_FLAG)
 
     train_loader = DataLoader(train_set, batch_size=2)
     val_loader = DataLoader(val_set, batch_size=2)
     test_loader = DataLoader(val_set, batch_size=2)
 
-    model = RegressionNet(hidden_size=768)
+    model = RegressionNet(hidden_size=768, encoder=model if BACKPROP_FLAG else None)
 
     trainer = pl.Trainer(gpus=1, precision=16, max_epochs=1)
     trainer.fit(model, train_loader, val_loader)
