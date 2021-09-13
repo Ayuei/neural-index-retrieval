@@ -83,42 +83,25 @@ def generate_encodings(question_encodings, sent_encodings, answers, sent_lists):
     return encodings
 
 
-def prepare_dataset(train_path, val_path):
-    #return contexts, questions, answers, sents, sent_starts
-    train_contexts, train_questions, train_answers, train_sents, train_sent_starts = read_path(train_path)
-    val_contexts, val_questions, val_answers, val_sents, val_sent_starts = read_path(val_path)
+def prepare_dataset(sen_model, path):
+    contexts, questions, answers, sents, sent_starts = read_path(path)
 
-    model = SentenceTransformer("all-distilroberta-v1")
-
-    train_sent_encodings = []
-    val_sent_encodings = []
+    sent_encodings = []
 
     @lru_cache(10)
-    def encode(sent):
-        return model.encode(sent)
+    def encode(sen):
+        return sen_model.encode(sen)
 
-    for train_sent in tqdm(train_sents, desc="Train sent encodes"):
-        train_sent_encodings.append(encode(train_sent))
+    for sent in tqdm(sents, desc="Train sent encodes"):
+        sent_encodings.append(encode(sent))
 
-    for val_sent in tqdm(val_sents, desc="Val sent encodes"):
-        val_sent_encodings.append(encode(val_sent))
+    question_encodings = model.encode(questions, show_progress_bar=True)
 
-    train_question_encodings = model.encode(train_questions, show_progress_bar=True)
-    val_question_encodings = model.encode(val_questions, show_progress_bar=True)
+    encodings = generate_encodings(question_encodings, sent_encodings, answers, sent_starts)
 
-    train_encodings = []
-    val_encodings = []
+    dset = MashQA(encodings)
 
-    train_encodings = generate_encodings(train_question_encodings, train_sent_encodings, train_answers, train_sent_starts)
-    val_encodings = generate_encodings(val_question_encodings, val_sent_encodings, val_answers, val_sent_starts)
-
-    #train_encodings = {"questions": train_question_encodings, "sents": train_sent_encodings}
-    #val_encodings = {"questions": val_question_encodings, "sents": val_sent_encodings}
-
-    train_dataset = MashQA(train_encodings)
-    val_dataset = MashQA(val_encodings)
-
-    return {"train": train_dataset, "val": val_dataset}
+    return dset
 
 
 class RegressionNet(pl.LightningModule):
@@ -130,6 +113,8 @@ class RegressionNet(pl.LightningModule):
 
         self.train_metric = pl.metrics.MeanSquaredError()
         self.val_metric = pl.metrics.MeanSquaredError()
+        self.test_metric = pl.metrics.MeanSquaredError()
+        self.test_acc = pl.metrics.Accuracy()
 
     def forward(self, qas, sents, label=None):
         x = torch.cat((qas, sents), dim=-1)
@@ -165,17 +150,33 @@ class RegressionNet(pl.LightningModule):
         self.log('val_loss', loss)
         self.log('val_met', self.val_metric, on_epoch=True, prog_bar=True)
 
+    def test_step(self, test_batch, batch_idx):
+        q, s, y = test_batch['question_encode'], test_batch['sentence_encode'], test_batch['label']
+        loss, y_hat = self.forward(q, s, y)
+
+        self.test_metric(y_hat.detach(), y.detach())
+        self.log('test_loss', loss)
+        self.log('test_met', self.test_metric, on_epoch=True, prog_bar=True)
+
+        self.test_acc(torch.round(y_hat), y.int())
+        self.log('test_acc', self.test_acc, on_epoch=True, prog_bar=True)
+
 
 if __name__ == "__main__":
-    dataset = prepare_dataset("./datasets/mashqa_data/train_webmd_squad_v2_consec.json",
-                              "./datasets/mashqa_data/val_webmd_squad_v2_consec.json")
+    model = SentenceTransformer("all-distilroberta-v1")
 
-    train_set, val_set = dataset["train"], dataset["val"]
+    train_set = prepare_dataset(model, "./datasets/mashqa_data/train_webmd_squad_v2_consec.json")
+    val_set = prepare_dataset(model, "./datasets/mashqa_data/val_webmd_squad_v2_consec.json")
+    test_set = prepare_dataset(model, "./datasets/mashqa_data/test_webmd_squad_v2_consec.json")
+
+    del model
 
     train_loader = DataLoader(train_set, batch_size=2)
     val_loader = DataLoader(val_set, batch_size=2)
+    test_loader = DataLoader(val_set, batch_size=2)
 
     model = RegressionNet(hidden_size=768)
 
-    trainer = pl.Trainer(gpus=1, precision=16, max_epochs=3)
+    trainer = pl.Trainer(gpus=1, precision=16, max_epochs=1)
     trainer.fit(model, train_loader, val_loader)
+    print(trainer.test(dataloaders=test_loader))
