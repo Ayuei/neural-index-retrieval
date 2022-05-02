@@ -1,12 +1,16 @@
 [submodule "cds_semantic_index"]
 	path = create_semantic_index 
 	url = https://github.com/Ayuei/cds_semantic_index.git
+	update = merge # <-- this is what you need to add
 [submodule "cds_2021"]
 	path = query 
 	url = https://github.com/Ayuei/cds_2021.git
+	update = merge # <-- this is what you need to add
 [submodule "go-clinical-indexer"]
 	path = indexer
 	url = https://github.com/Ayuei/go-clinical-indexer.git
+	update = merge # <-- this is what you need to add
 [submodule "squad_test_site/entmax"]
 	path = squad_test_site/entmax
 	url = https://github.com/deep-spin/entmax.git
+	update = merge # <-- this is what you need to add
